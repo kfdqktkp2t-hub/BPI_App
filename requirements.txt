@@ -1,0 +1,8 @@
+streamlit
+pandas
+requests
+beautifulsoup4
+lxml
+Pillow
+python-dateutil
+rapidfuzz
