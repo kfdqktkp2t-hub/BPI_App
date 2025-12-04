@@ -18,8 +18,6 @@ import streamlit as st
 # =========================
 st.set_page_config(page_title="CBB Matchups • ESPN BPI", page_icon="🏀", layout="wide")
 PRIMARY = "#0B1020"
-ACCENT = "#14B8A6"
-ACCENT2 = "#F97316"
 LIGHT = "#E2E8F0"
 TIMEZONE = "America/New_York"
 DIV1_GROUP_ID = "50"  # ESPN uses 50 for Division I
@@ -39,7 +37,7 @@ TEAM_ALIASES: Dict[str, str] = {
     "UT Arlington": "Texas Arlington",
     "UT Rio Grande Valley": "Texas Rio Grande Valley",
     "Central Florida": "UCF",
-    "Miami": "Miami (FL)",  # ESPN often uses (FL) for NCAAM
+    "Miami": "Miami (FL)",
 }
 
 def clean_team(name: str) -> str:
@@ -49,7 +47,7 @@ def clean_team(name: str) -> str:
     return TEAM_ALIASES.get(name, name)
 
 # =========================
-# Safe formatters
+# Safe formatter
 # =========================
 def fmt_signed(x):
     """Format as +1.1 or -1.1, return em dash for non-numeric."""
@@ -93,7 +91,6 @@ def season_year_from_date(d: datetime.date) -> int:
 # =========================
 @st.cache_data(ttl=3*60*60, show_spinner=False)
 def fetch_espn_scoreboard(date_yyyymmdd: str) -> dict:
-    """ESPN men's CBB scoreboard JSON (public)."""
     url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
     params = {"dates": date_yyyymmdd, "groups": DIV1_GROUP_ID, "limit": 500}
     r = requests.get(url, params=params, timeout=25)
@@ -105,7 +102,6 @@ def fetch_espn_scoreboard(date_yyyymmdd: str) -> dict:
 # =========================
 @st.cache_data(ttl=6*60*60, show_spinner=False)
 def fetch_espn_bpi_via_api() -> Optional[pd.DataFrame]:
-    """Try a few public web API variants ESPN uses internally."""
     urls = [
         "https://site.web.api.espn.com/apis/fitt/v3/sports/basketball/mens-college-basketball/rankings?type=bpi",
         "https://site.api.espn.com/apis/fitt/v3/sports/basketball/mens-college-basketball/rankings?type=bpi",
@@ -118,7 +114,6 @@ def fetch_espn_bpi_via_api() -> Optional[pd.DataFrame]:
             if r.status_code != 200:
                 continue
             data = r.json()
-            # Locate the list
             items = None
             for key in ("items", "rankings", "data", "teams"):
                 if isinstance(data, dict) and isinstance(data.get(key), list):
@@ -127,7 +122,6 @@ def fetch_espn_bpi_via_api() -> Optional[pd.DataFrame]:
             if not items:
                 continue
 
-            rows = []
             def get(d, *path, default=None):
                 cur = d
                 for p in path:
@@ -136,12 +130,15 @@ def fetch_espn_bpi_via_api() -> Optional[pd.DataFrame]:
                     else:
                         return default
                 return cur
+
+            rows = []
             for it in items:
                 nm = get(it, "team", "displayName") or get(it, "team", "name") or it.get("name")
                 bpi = get(it, "metrics", "bpi", "value") or it.get("bpi") or get(it, "ratings", "bpi")
                 if nm is None or bpi is None:
                     continue
                 rows.append({"Team": str(nm).strip(), "BPI": float(bpi)})
+
             if rows:
                 df = pd.DataFrame(rows)
                 df["Team_norm"] = df["Team"].apply(clean_team)
@@ -152,18 +149,14 @@ def fetch_espn_bpi_via_api() -> Optional[pd.DataFrame]:
 
 def _flatten_columns(df: pd.DataFrame) -> List[str]:
     if isinstance(df.columns, pd.MultiIndex):
-        cols = [" ".join([str(x) for x in tup if str(x) != "nan"]).strip() for tup in df.columns.to_list()]
-    else:
-        cols = [str(c) for c in df.columns]
-    return cols
+        return [" ".join([str(x) for x in tup if str(x) != "nan"]).strip() for tup in df.columns.to_list()]
+    return [str(c) for c in df.columns]
 
 def _score_table(df: pd.DataFrame) -> Tuple[int, Optional[str], bool]:
-    """Score a candidate table for being the BPI table."""
     cols = _flatten_columns(df)
     lower = [c.lower().strip() for c in cols]
     has_team = any("team" in c for c in lower)
 
-    # Identify BPI column if present
     bpi_col = None
     for c in cols:
         cl = c.lower()
@@ -171,14 +164,12 @@ def _score_table(df: pd.DataFrame) -> Tuple[int, Optional[str], bool]:
             bpi_col = c
             break
 
-    # Numeric columns
     num_cols = []
     for c in cols:
         s = pd.to_numeric(df[c], errors="coerce")
         if s.notna().sum() >= max(5, int(0.3 * len(df))):
             num_cols.append(c)
 
-    # Heuristic score
     score = 0
     if bpi_col: score += 60
     if any(c.startswith("off") for c in lower): score += 10
@@ -190,14 +181,9 @@ def _score_table(df: pd.DataFrame) -> Tuple[int, Optional[str], bool]:
 
 @st.cache_data(ttl=6*60*60, show_spinner=False)
 def fetch_espn_bpi_via_html() -> pd.DataFrame:
-    """
-    Robust HTML parse: try all tables, pick the best-scoring candidate.
-    Returns DataFrame with Team, Team_norm, BPI.
-    """
     url = "https://www.espn.com/mens-college-basketball/bpi"
     html = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25).text
 
-    # Try pandas.read_html for all tables
     try:
         tables = pd.read_html(html, flavor="lxml")
     except Exception:
@@ -210,7 +196,6 @@ def fetch_espn_bpi_via_html() -> pd.DataFrame:
         score, bpi_col, has_team = _score_table(df)
         candidates.append((score, df, bpi_col, has_team))
 
-    # If nothing, use the first <table> via BeautifulSoup
     if not candidates:
         soup = BeautifulSoup(html, "lxml")
         table_tag = soup.find("table")
@@ -221,11 +206,9 @@ def fetch_espn_bpi_via_html() -> pd.DataFrame:
         score, bpi_col, has_team = _score_table(df)
         candidates.append((score, df, bpi_col, has_team))
 
-    # Pick best candidate
     candidates.sort(key=lambda x: x[0], reverse=True)
     cand, bpi_col, has_team = candidates[0][1], candidates[0][2], candidates[0][3]
 
-    # Ensure Team column
     if not has_team:
         cand = cand.rename(columns={cand.columns[0]: "Team"})
     else:
@@ -234,9 +217,7 @@ def fetch_espn_bpi_via_html() -> pd.DataFrame:
                 cand = cand.rename(columns={c: "Team"})
                 break
 
-    # Ensure BPI column
     if not bpi_col:
-        # choose a numeric column whose median sits in a reasonable BPI range
         num_cols = []
         for c in list(cand.columns):
             s = pd.to_numeric(cand[c], errors="coerce")
@@ -259,27 +240,21 @@ def fetch_espn_bpi_via_html() -> pd.DataFrame:
 
 @st.cache_data(ttl=6*60*60, show_spinner=False)
 def fetch_torvik_rating(year: int) -> pd.DataFrame:
-    """Fallback: Torvik ADJEM (public CSV)."""
     url = f"https://barttorvik.com/getadvstats.php?year={year}&csv=1"
-    # Try header=0 first (common)
     try:
         df = pd.read_csv(url)
     except Exception:
-        # Fallback to header=None pattern
         df = pd.read_csv(url, header=None)
         if isinstance(df.iloc[0, 0], str) and df.iloc[0, 0].lower().startswith("team"):
             df.columns = df.iloc[0]
             df = df[1:]
-    # Normalize
     if "Team" not in df.columns:
         df = df.rename(columns={df.columns[0]: "Team"})
     df.columns = [str(c).strip() for c in df.columns]
     df["Team_norm"] = df["Team"].apply(clean_team)
-    # Torvik ADJEM (adjusted efficiency margin)
     if "ADJEM" in df.columns:
         df["TRank"] = pd.to_numeric(df["ADJEM"], errors="coerce")
     else:
-        # Try alt names if schema changes
         alt = [c for c in df.columns if c.lower() in ("adjem", "adj_em", "rating", "margin")]
         df["TRank"] = pd.to_numeric(df[alt[0]], errors="coerce") if alt else pd.NA
     df = df.dropna(subset=["Team_norm"]).reset_index(drop=True)
@@ -287,16 +262,10 @@ def fetch_torvik_rating(year: int) -> pd.DataFrame:
 
 @st.cache_data(ttl=6*60*60, show_spinner=False)
 def fetch_espn_bpi(season_year: int, emergency_csv_url: Optional[str]) -> Tuple[pd.DataFrame, Optional[pd.DataFrame], str]:
-    """
-    Returns (bpi_df, torvik_df_if_used, source_label)
-      - source_label is "ESPN API", "ESPN HTML", "Torvik fallback", or "CSV URL"
-    """
-    # 1) ESPN API
     api_df = fetch_espn_bpi_via_api()
     if api_df is not None and len(api_df) > 0:
         return api_df, None, "ESPN API"
 
-    # 2) ESPN HTML
     try:
         html_df = fetch_espn_bpi_via_html()
         if len(html_df) > 0:
@@ -304,11 +273,9 @@ def fetch_espn_bpi(season_year: int, emergency_csv_url: Optional[str]) -> Tuple[
     except Exception:
         pass
 
-    # 3) Emergency CSV URL (optional)
     if emergency_csv_url:
         try:
             df = pd.read_csv(emergency_csv_url)
-            # Normalize to Team, Team_norm, BPI
             cols = {c.lower().strip(): c for c in df.columns}
             team_col = cols.get("team") or cols.get("school") or list(df.columns)[0]
             rating_col = cols.get("bpi") or cols.get("adjem") or cols.get("rating") or list(df.columns)[1]
@@ -323,17 +290,15 @@ def fetch_espn_bpi(season_year: int, emergency_csv_url: Optional[str]) -> Tuple[
         except Exception:
             pass
 
-    # 4) Torvik fallback (use correct season year)
     tdf = fetch_torvik_rating(season_year)
     out = tdf.rename(columns={"TRank": "BPI"}).dropna(subset=["BPI"]).copy()
     if not out.empty:
         return out[["Team", "Team_norm", "BPI"]], tdf, "Torvik fallback"
 
-    # Nothing worked
     return pd.DataFrame(columns=["Team", "Team_norm", "BPI"]), None, "None"
 
 # =========================
-# Image card rendering
+# Fonts
 # =========================
 def load_font(size: int) -> ImageFont.FreeTypeFont:
     paths = [
@@ -349,49 +314,41 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
             continue
     return ImageFont.load_default()
 
-TITLE_FONT = load_font(58)
-MED_FONT = load_font(42)
-BIG_FONT = load_font(112)
+TITLE_FONT = load_font(48)
+MED_FONT = load_font(36)
+BIG_FONT = load_font(96)
+SMALL_FONT = load_font(28)
 BADGE_FONT = load_font(72)
 
+# =========================
+# Logo fallback (badges)
+# =========================
 def _initials(team_name: str, max_letters: int = 3) -> str:
-    """
-    Build neat initials like 'UNC' for 'North Carolina', 'UAB' for 'Alabama-Birmingham', etc.
-    """
     if not team_name:
         return "—"
-    # Prefer existing abbreviations like 'UAB', 'UCF', 'NC'
     parts = team_name.replace("-", " ").split()
     up = [p for p in parts if p.isupper() and len(p) <= 4]
     if up:
         s = "".join(up)[:max_letters]
         return s if s else team_name[:max_letters].upper()
-    # Take first letters of words, skip common stopwords
     stop = {"of", "the", "and", "at", "st", "state"}
     letters = [w[0] for w in parts if w and w.lower() not in stop]
     if letters:
         return "".join(letters)[:max_letters].upper()
     return team_name[:max_letters].upper()
 
-def draw_badge(team_name: str, size=(240, 240), color=(35, 48, 77)) -> Image.Image:
-    """
-    Fallback: circular badge with team initials (no logos needed).
-    """
+def draw_badge(team_name: str, size=(200, 200), color=(35, 48, 77)) -> Image.Image:
     W, H = size
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.ellipse((0, 0, W, H), fill=color)
     txt = _initials(team_name)
-    # Center text
-    w, h = d.textbbox((0, 0), txt, font=BADGE_FONT)[2:]
+    bbox = d.textbbox((0, 0), txt, font=BADGE_FONT)
+    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     d.text(((W - w) / 2, (H - h) / 2 - 4), txt, fill=(255, 255, 255), font=BADGE_FONT)
     return img
 
-def fetch_logo_img(url: Optional[str], team_name: str, size=(240, 240)) -> Image.Image:
-    """
-    Returns a PIL Image (RGBA). If the URL is bad or not an image, returns a badge.
-    Never raises.
-    """
+def fetch_logo_img(url: Optional[str], team_name: str, size=(200, 200)) -> Image.Image:
     if not url or not isinstance(url, str) or not url.startswith("http"):
         return draw_badge(team_name, size=size)
     try:
@@ -407,6 +364,9 @@ def fetch_logo_img(url: Optional[str], team_name: str, size=(240, 240)) -> Image
     except (requests.RequestException, UnidentifiedImageError, OSError, ValueError):
         return draw_badge(team_name, size=size)
 
+# =========================
+# Card renderers
+# =========================
 def draw_edge_bar(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, value: float, vmin=-15.0, vmax=15.0):
     draw.rounded_rectangle((x, y, x + w, y + h), radius=8, fill=(24, 30, 54))
     v = max(min(value, vmax), vmin)
@@ -415,7 +375,7 @@ def draw_edge_bar(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, val
     col = (20, 184, 166) if value >= 0 else (249, 115, 22)
     draw.rounded_rectangle((x, y, x + fill_w, y + h), radius=8, fill=col)
 
-def draw_card(row: pd.Series, brand_text: str = "CBB Edges", brand_logo_url: Optional[str] = None) -> Image.Image:
+def draw_card_original(row: pd.Series, brand_text: str = "CBB Edges", brand_logo_url: Optional[str] = None) -> Image.Image:
     W, H = 1600, 900
     img = Image.new("RGB", (W, H), color=(11, 16, 32))
     d = ImageDraw.Draw(img)
@@ -448,27 +408,119 @@ def draw_card(row: pd.Series, brand_text: str = "CBB Edges", brand_logo_url: Opt
     d.text((center_x, 235), fmt_signed(diff), fill=(255, 255, 255), font=BIG_FONT, anchor="lm")
     draw_edge_bar(d, center_x, 380, 500, 26, float(diff) if isinstance(diff, (float, int)) and not math.isnan(diff) else 0.0)
 
-    # Logos or badges (ALWAYS succeeds with an RGBA image)
+    # Logos/badges
     a_mark = fetch_logo_img(row.get("Away Logo"), away, size=(240, 240))
     h_mark = fetch_logo_img(row.get("Home Logo"), home, size=(240, 240))
     img.paste(a_mark, (120, 540), a_mark)
     img.paste(h_mark, (W - 120 - 240, 540), h_mark)
 
-    # Footer: time and location
+    # Footer
     footer = f"{row.get('time_str', '')} ET"
     loc = row.get("location", "")
     if loc:
         footer += f" • {loc}"
     d.text((60, H - 90), footer, fill=(16, 24, 40), font=TITLE_FONT)
 
-    # Brand stamp (text or logo)
+    # Brand
     if brand_logo_url:
         bl = fetch_logo_img(brand_logo_url, "Brand", size=(160, 160))
         img.paste(bl, (W - 200, 40), bl)
     else:
         d.text((W - 60, 60), brand_text, fill=(230, 235, 240), font=MED_FONT, anchor="ra")
+    return img
+
+def draw_card_simple(row: pd.Series, brand_text: str = "CBB Edges") -> Image.Image:
+    """
+    Simple, table-like card: white background, two rows (Away, Home),
+    columns: Logo | Team | BPI, with a top header showing Rating Gap and game info.
+    """
+    W, H = 1200, 675
+    bg = (255, 255, 255)
+    grid = (230, 230, 230)
+    txt = (24, 24, 24)
+    sub = (90, 90, 90)
+    accent_pos = (20, 184, 166)
+    accent_neg = (249, 115, 22)
+
+    img = Image.new("RGB", (W, H), bg)
+    d = ImageDraw.Draw(img)
+
+    # Header
+    header_h = 120
+    d.rectangle((0, 0, W, header_h), fill=(250, 250, 250), outline=grid)
+    title = f"{row.get('date_str','')}  •  ESPN BPI"
+    d.text((24, 24), title, font=MED_FONT, fill=txt)
+    meta = f"{row.get('time_str','')} ET"
+    if row.get("location"):
+        meta += f" • {row.get('location')}"
+    d.text((24, 24 + 46), meta, font=SMALL_FONT, fill=sub)
+
+    # Gap box (Home − Away)
+    gap = row.get("BPI_diff")
+    gap_txt = "—" if pd.isna(gap) else f"{gap:+.1f}"
+    gap_color = accent_pos if (not pd.isna(gap) and gap >= 0) else accent_neg
+    gap_w, gap_h = 220, 68
+    gx, gy = W - gap_w - 24, 24
+    d.rounded_rectangle((gx, gy, gx + gap_w, gy + gap_h), radius=10, fill=gap_color)
+    d.text((gx + gap_w / 2, gy + gap_h / 2), f"Gap {gap_txt}", font=MED_FONT, fill=(255, 255, 255), anchor="mm")
+
+    # Table area
+    table_x, table_y = 24, header_h + 16
+    table_w, table_h = W - 48, 420
+    d.rectangle((table_x, table_y, table_x + table_w, table_y + table_h), outline=grid, fill=(255, 255, 255))
+
+    # Column widths
+    col_logo_w = 160
+    col_team_w = 700
+    col_bpi_w = table_w - col_logo_w - col_team_w
+
+    # Header row
+    row_h = 70
+    d.rectangle((table_x, table_y, table_x + table_w, table_y + row_h), fill=(248, 248, 248), outline=grid)
+    d.text((table_x + 16, table_y + row_h / 2), "Team", font=MED_FONT, fill=txt, anchor="lm")
+    d.text((table_x + col_logo_w + col_team_w + 16, table_y + row_h / 2), "BPI", font=MED_FONT, fill=txt, anchor="lm")
+
+    # Rows: Away then Home
+    def draw_team_row(y, team, logo_url, bpi):
+        d.line((table_x, y, table_x + table_w, y), fill=grid)
+        mark = fetch_logo_img(logo_url, team, size=(120, 120))
+        mx = table_x + 20
+        my = int(y + (row_h * 2 - 120) / 2)
+        img.paste(mark, (mx, my), mark)
+        d.text((table_x + col_logo_w + 12, y + row_h), team, font=TITLE_FONT, fill=txt, anchor="lm")
+        btxt = "—" if pd.isna(bpi) else f"{float(bpi):+.1f}"
+        d.text((table_x + col_logo_w + col_team_w + 16, y + row_h), btxt, font=TITLE_FONT, fill=txt, anchor="lm")
+
+    draw_team_row(table_y + row_h, str(row["away"]), row.get("Away Logo"), row.get("BPI_away"))
+    draw_team_row(table_y + row_h * 3, str(row["home"]), row.get("Home Logo"), row.get("BPI_home"))
+
+    # Footer brand
+    d.line((24, H - 70, W - 24, H - 70), fill=grid)
+    d.text((W - 24, H - 48), brand_text, font=SMALL_FONT, fill=sub, anchor="rs")
 
     return img
+
+def draw_sheet_simple(rows: List[pd.Series], brand_text: str = "CBB Edges", cols: int = 2) -> Image.Image:
+    cards = [draw_card_simple(r, brand_text=brand_text) for r in rows]
+    if not cards:
+        return Image.new("RGB", (1200, 600), (255, 255, 255))
+    cw, ch = cards[0].size
+    gap = 24
+    col_count = max(1, int(cols))
+    row_count = (len(cards) + col_count - 1) // col_count
+    W = col_count * cw + (col_count + 1) * gap
+    H = row_count * ch + (row_count + 1) * gap + 40
+    sheet = Image.new("RGB", (W, H), (255, 255, 255))
+    d = ImageDraw.Draw(sheet)
+    d.text((gap, 10), "CBB Matchups • ESPN BPI (Simple Sheet)", font=MED_FONT, fill=(24, 24, 24))
+    for idx, card in enumerate(cards):
+        r = idx // col_count
+        c = idx % col_count
+        x = gap + c * (cw + gap)
+        y = gap + 30 + r * (ch + gap)
+        sheet.paste(card, (x, y))
+    d.text((W - gap, H - 20), brand_text, font=SMALL_FONT, fill=(100, 100, 100), anchor="rs")
+    return sheet
 
 # =========================
 # UI header
@@ -477,7 +529,7 @@ st.markdown(
     f"""
     <div style="padding:12px 16px;border-radius:12px;background:{PRIMARY};color:{LIGHT};margin-bottom:10px;">
       <div style="font-weight:800;font-size:22px;">🏀 College Hoops Matchups • ESPN BPI</div>
-      <div style="opacity:.9;">Daily D-I games, BPI ratings, rating gaps, and exportable social cards.</div>
+      <div style="opacity:.9;">Daily D-I games, BPI ratings, rating gaps, and exportable images (simple table or original style).</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -491,13 +543,23 @@ with c1:
     default_date = datetime.now(tz.gettz(TIMEZONE)).date()
     pick_date = st.date_input("Date", default_date)
 with c2:
-    max_cards = st.number_input("Max cards to export (by biggest gap)", min_value=1, max_value=200, value=24, step=1)
+    max_cards = st.number_input("Max rows to export (by biggest gap)", min_value=1, max_value=200, value=24, step=1)
 with c3:
     brand_text = st.text_input("Brand footer text", value="CLT Capper • CBB Edges")
 
-brand_logo_url = st.text_input("Optional brand logo URL (PNG with transparency works best)", value="")
-emergency_csv_url = st.text_input("Emergency ratings CSV URL (optional; only if ESPN/Torvik both fail)", value="")
+brand_logo_url = st.text_input("Optional brand logo URL (used in Original style)", value="")
+emergency_csv_url = st.text_input("Emergency ratings CSV URL (optional fallback)", value="")
 debug_mode = st.checkbox("Debug: show data shapes/heads", value=False)
+
+card_style = st.radio(
+    "Card style",
+    options=["Simple (table)", "Original"],
+    index=0,
+    horizontal=True
+)
+
+make_one_sheet = st.checkbox("Make one-sheet image (grid of simple cards)", value=False)
+cols_per_sheet = st.slider("Columns on sheet (simple cards)", 1, 3, 2) if make_one_sheet else 2
 
 date_str = pick_date.strftime("%Y%m%d")
 season_year = season_year_from_date(pick_date)
@@ -564,7 +626,7 @@ if debug_mode:
 # =========================
 # Fetch ratings
 # =========================
-with st.spinner("Fetching ratings (ESPN BPI → HTML → Torvik)..."):
+with st.spinner("Fetching ratings (ESPN BPI → HTML → Torvik → CSV)..."):
     bpi_df, torvik_df, bpi_source = fetch_espn_bpi(season_year, emergency_csv_url or None)
 
 if debug_mode:
@@ -616,7 +678,6 @@ else:
 
 show_cols = ["time_str", "away", "BPI_away", "home", "BPI_home", "BPI_diff", "location"]
 
-# Ensure numeric to avoid Styler format crashes
 for c in ["BPI_home", "BPI_away", "BPI_diff"]:
     if c in merged.columns:
         merged[c] = pd.to_numeric(merged[c], errors="coerce")
@@ -645,10 +706,10 @@ styled = (
 st.dataframe(styled, use_container_width=True)
 
 # =========================
-# Export image cards
+# Export images
 # =========================
 st.markdown("---")
-st.subheader("Export X-ready image cards")
+st.subheader("Export images")
 
 selection = st.multiselect(
     "Pick specific games (or leave blank to export the top N by gap):",
@@ -658,29 +719,56 @@ selection = st.multiselect(
 
 to_export = merged.loc[selection] if selection else merged.head(int(max_cards))
 
-if st.button("Generate and download ZIP"):
-    images = []
-    for _, row in to_export.iterrows():
-        if pd.isna(row["BPI_home"]) or pd.isna(row["BPI_away"]):
-            continue
-        card = draw_card(row, brand_text=brand_text, brand_logo_url=brand_logo_url or None)
-        fname = f"{row['away']} at {row['home']} - {row['date_str']}.png".replace("/", "-")
-        images.append((fname, card))
+col1, col2 = st.columns([1, 1])
 
-    if not images:
-        st.warning("Nothing to export (ratings missing for selected games).")
-    else:
-        bio = io.BytesIO()
-        with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for fname, im in images:
-                buf = io.BytesIO()
-                im.save(buf, format="PNG")
-                zf.writestr(fname, buf.getvalue())
-        st.download_button(
-            "Download ZIP of image cards",
-            data=bio.getvalue(),
-            file_name=f"cbb_cards_{pick_date.strftime('%Y%m%d')}.zip",
-            mime="application/zip",
-        )
+with col1:
+    if st.button("Generate ZIP of individual images"):
+        images = []
+        for _, row in to_export.iterrows():
+            if pd.isna(row["BPI_home"]) or pd.isna(row["BPI_away"]):
+                continue
+            if card_style.startswith("Simple"):
+                card = draw_card_simple(row, brand_text=brand_text)
+            else:
+                card = draw_card_original(row, brand_text=brand_text, brand_logo_url=brand_logo_url or None)
+            fname = f"{row['away']} at {row['home']} - {row['date_str']}.png".replace("/", "-")
+            buf = io.BytesIO()
+            card.save(buf, format="PNG")
+            images.append((fname, buf.getvalue()))
 
-st.caption("BPI is ESPN's predictive power rating. Rating gap = Home minus Away.")
+        if not images:
+            st.warning("Nothing to export (ratings missing for selected games).")
+        else:
+            bio = io.BytesIO()
+            with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for fname, data in images:
+                    zf.writestr(fname, data)
+            st.download_button(
+                "Download ZIP",
+                data=bio.getvalue(),
+                file_name=f"cbb_cards_{pick_date.strftime('%Y%m%d')}.zip",
+                mime="application/zip",
+            )
+
+with col2:
+    if make_one_sheet and st.button("Generate one-sheet image"):
+        rows_for_sheet = []
+        for _, row in to_export.iterrows():
+            if pd.isna(row["BPI_home"]) or pd.isna(row["BPI_away"]):
+                continue
+            rows_for_sheet.append(row)
+
+        if not rows_for_sheet:
+            st.warning("Nothing to include (ratings missing for selected games).")
+        else:
+            sheet = draw_sheet_simple(rows_for_sheet, brand_text=brand_text, cols=int(cols_per_sheet))
+            bio = io.BytesIO()
+            sheet.save(bio, format="PNG")
+            st.download_button(
+                "Download Sheet PNG",
+                data=bio.getvalue(),
+                file_name=f"cbb_sheet_{pick_date.strftime('%Y%m%d')}.png",
+                mime="image/png",
+            )
+
+st.caption("BPI is ESPN's predictive power rating. Rating gap = Home minus Away (home − away).")
