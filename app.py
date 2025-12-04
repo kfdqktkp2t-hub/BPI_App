@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from rapidfuzz import process, fuzz
 import streamlit as st
 
@@ -71,11 +71,16 @@ def best_match(name: str, candidates: List[str]) -> Optional[str]:
     return m[0] if m else None
 
 def team_logo_from_competitor(comp) -> Optional[str]:
-    t = comp.get("team", {}) if isinstance(comp, dict) else {}
+    try:
+        t = comp.get("team", {}) if isinstance(comp, dict) else {}
+    except Exception:
+        return None
+    if not isinstance(t, dict):
+        return None
     if t.get("logo"):
         return t.get("logo")
     logos = t.get("logos", [])
-    if isinstance(logos, list) and logos:
+    if isinstance(logos, list) and logos and isinstance(logos[0], dict):
         return logos[0].get("href")
     return None
 
@@ -347,15 +352,60 @@ def load_font(size: int) -> ImageFont.FreeTypeFont:
 TITLE_FONT = load_font(58)
 MED_FONT = load_font(42)
 BIG_FONT = load_font(112)
+BADGE_FONT = load_font(72)
 
-def fetch_logo_img(url: Optional[str], size=(260, 260)) -> Optional[Image.Image]:
-    if not url:
-        return None
+def _initials(team_name: str, max_letters: int = 3) -> str:
+    """
+    Build neat initials like 'UNC' for 'North Carolina', 'UAB' for 'Alabama-Birmingham', etc.
+    """
+    if not team_name:
+        return "—"
+    # Prefer existing abbreviations like 'UAB', 'UCF', 'NC'
+    parts = team_name.replace("-", " ").split()
+    up = [p for p in parts if p.isupper() and len(p) <= 4]
+    if up:
+        s = "".join(up)[:max_letters]
+        return s if s else team_name[:max_letters].upper()
+    # Take first letters of words, skip common stopwords
+    stop = {"of", "the", "and", "at", "st", "state"}
+    letters = [w[0] for w in parts if w and w.lower() not in stop]
+    if letters:
+        return "".join(letters)[:max_letters].upper()
+    return team_name[:max_letters].upper()
+
+def draw_badge(team_name: str, size=(240, 240), color=(35, 48, 77)) -> Image.Image:
+    """
+    Fallback: circular badge with team initials (no logos needed).
+    """
+    W, H = size
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse((0, 0, W, H), fill=color)
+    txt = _initials(team_name)
+    # Center text
+    w, h = d.textbbox((0, 0), txt, font=BADGE_FONT)[2:]
+    d.text(((W - w) / 2, (H - h) / 2 - 4), txt, fill=(255, 255, 255), font=BADGE_FONT)
+    return img
+
+def fetch_logo_img(url: Optional[str], team_name: str, size=(240, 240)) -> Image.Image:
+    """
+    Returns a PIL Image (RGBA). If the URL is bad or not an image, returns a badge.
+    Never raises.
+    """
+    if not url or not isinstance(url, str) or not url.startswith("http"):
+        return draw_badge(team_name, size=size)
     try:
-        img = Image.open(io.BytesIO(requests.get(url, timeout=12).content)).convert("RGBA")
-        return img.resize(size)
-    except Exception:
-        return None
+        r = requests.get(url, timeout=10, stream=True)
+        if r.status_code != 200:
+            return draw_badge(team_name, size=size)
+        ctype = r.headers.get("Content-Type", "")
+        if "image" not in ctype:
+            return draw_badge(team_name, size=size)
+        content = r.content
+        im = Image.open(io.BytesIO(content)).convert("RGBA")
+        return im.resize(size)
+    except (requests.RequestException, UnidentifiedImageError, OSError, ValueError):
+        return draw_badge(team_name, size=size)
 
 def draw_edge_bar(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, value: float, vmin=-15.0, vmax=15.0):
     draw.rounded_rectangle((x, y, x + w, y + h), radius=8, fill=(24, 30, 54))
@@ -398,13 +448,11 @@ def draw_card(row: pd.Series, brand_text: str = "CBB Edges", brand_logo_url: Opt
     d.text((center_x, 235), fmt_signed(diff), fill=(255, 255, 255), font=BIG_FONT, anchor="lm")
     draw_edge_bar(d, center_x, 380, 500, 26, float(diff) if isinstance(diff, (float, int)) and not math.isnan(diff) else 0.0)
 
-    # Logos
-    a_logo = fetch_logo_img(row.get("Away Logo"))
-    h_logo = fetch_logo_img(row.get("Home Logo"))
-    if a_logo:
-        img.paste(a_logo, (120, 540), a_logo)
-    if h_logo:
-        img.paste(h_logo, (W - 120 - 260, 540), h_logo)
+    # Logos or badges (ALWAYS succeeds with an RGBA image)
+    a_mark = fetch_logo_img(row.get("Away Logo"), away, size=(240, 240))
+    h_mark = fetch_logo_img(row.get("Home Logo"), home, size=(240, 240))
+    img.paste(a_mark, (120, 540), a_mark)
+    img.paste(h_mark, (W - 120 - 240, 540), h_mark)
 
     # Footer: time and location
     footer = f"{row.get('time_str', '')} ET"
@@ -415,11 +463,8 @@ def draw_card(row: pd.Series, brand_text: str = "CBB Edges", brand_logo_url: Opt
 
     # Brand stamp (text or logo)
     if brand_logo_url:
-        bl = fetch_logo_img(brand_logo_url, size=(180, 180))
-        if bl:
-            img.paste(bl, (W - 220, 40), bl)
-        else:
-            d.text((W - 60, 60), brand_text, fill=(230, 235, 240), font=MED_FONT, anchor="ra")
+        bl = fetch_logo_img(brand_logo_url, "Brand", size=(160, 160))
+        img.paste(bl, (W - 200, 40), bl)
     else:
         d.text((W - 60, 60), brand_text, fill=(230, 235, 240), font=MED_FONT, anchor="ra")
 
